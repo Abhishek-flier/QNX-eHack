@@ -1,0 +1,251 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdbool.h>
+#include <pthread.h>
+#include <unistd.h>
+
+#define LANES 4
+
+typedef struct {
+    char name[20];
+    int vehicles;
+    bool emergency;
+    char emergencyType[20];
+} Lane;
+
+// ---------------- GLOBAL DATA ----------------
+Lane lanes[LANES] = {
+    {"North", 0, false, ""},
+    {"South", 0, false, ""},
+    {"East",  0, false, ""},
+    {"West",  0, false, ""}
+};
+
+bool active_lane[LANES] = {false};
+
+pthread_mutex_t lock;
+pthread_cond_t cond;
+
+// ---------------- PRIORITY ----------------
+int getPriority(Lane *l) {
+
+    if (l->emergency) {
+        if (strcmp(l->emergencyType, "ambulance") == 0) return 1;
+        if (strcmp(l->emergencyType, "fire") == 0) return 2;
+        if (strcmp(l->emergencyType, "disaster") == 0) return 3;
+        if (strcmp(l->emergencyType, "police") == 0) return 4;
+    }
+
+    return 5; // normal traffic
+}
+
+// ---------------- TIME ----------------
+int calculateTime(int v) {
+    int t = v * 2+5;
+    if (t < 5) t = 5;
+    if (t > 60) t = 60;
+    return t;
+}
+
+// ---------------- MOVEMENT ----------------
+void movementSplit(int v) {
+
+    int straight = v * 50 / 100;
+    int left     = v * 20 / 100;
+    int right    = v * 20 / 100;
+    int uturn    = v - (straight + left + right);
+
+    printf("Movement Distribution:\n");
+    printf("  Straight: %d\n", straight);
+    printf("  Left    : %d\n", left);
+    printf("  Right   : %d\n", right);
+    printf("  U-Turn  : %d\n", uturn);
+}
+
+// ---------------- INPUT ----------------
+void updateTrafficData() {
+
+    printf("\n=============================\n");
+    printf("ENTER TRAFFIC DATA (format: vehicles type)\n");
+    printf("Example: 12 none | 14 fire | 15 ambulance\n");
+    printf("=============================\n");
+
+    for (int i = 0; i < LANES; i++) {
+
+        while (1) {
+
+            printf("\nLane %s -> ", lanes[i].name);
+
+            int vehicles;
+            char type[20];
+
+            // Accept both "12 none" and "12,none"
+            int result = scanf("%d ,%19s", &vehicles, type);
+
+            if (result != 2) {
+                // Try without comma
+                while (getchar() != '\n');
+
+                printf("Invalid format! Use: 12 none or 12,none\n");
+                continue;
+            }
+
+            if (vehicles < 0) {
+                printf("Vehicles must be >= 0\n");
+                continue;
+            }
+
+            lanes[i].vehicles = vehicles;
+
+            if (strcmp(type, "none") == 0) {
+                lanes[i].emergency = false;
+                strcpy(lanes[i].emergencyType, "");
+            }
+            else if (strcmp(type, "ambulance") == 0 ||
+                     strcmp(type, "fire") == 0 ||
+                     strcmp(type, "disaster") == 0 ||
+                     strcmp(type, "police") == 0) {
+
+                lanes[i].emergency = true;
+                strcpy(lanes[i].emergencyType, type);
+            }
+            else {
+                printf("Invalid type! Use: ambulance/fire/disaster/police/none\n");
+                continue;
+            }
+
+            active_lane[i] = false;
+            break;
+        }
+    }
+
+    printf("\nAll inputs received. Starting execution...\n");
+}
+
+// ---------------- SELECTION ----------------
+int selectLane() {
+
+    int best = -1;
+    int bestPriority = 999;
+
+    for (int i = 0; i < LANES; i++) {
+
+        if (active_lane[i]) continue;
+
+        int priority = getPriority(&lanes[i]);
+
+        // Step 1: priority selection
+        if (best == -1 || priority < bestPriority) {
+            bestPriority = priority;
+            best = i;
+        }
+
+        // Step 2: normal lanes → max vehicles
+        else if (priority == bestPriority && priority == 5) {
+            if (lanes[i].vehicles > lanes[best].vehicles) {
+                best = i;
+            }
+        }
+    }
+
+    return best;
+}
+
+// ---------------- THREAD ----------------
+void* laneThread(void *arg) {
+
+    int id = *(int*)arg;
+
+    while (1) {
+
+        pthread_mutex_lock(&lock);
+
+        while (!active_lane[id]) {
+            pthread_cond_wait(&cond, &lock);
+        }
+
+        Lane lane = lanes[id];
+
+        pthread_mutex_unlock(&lock);
+
+        printf("\n[GREEN] %s\n", lane.name);
+
+        if (lane.emergency)
+            printf("EMERGENCY: %s\n", lane.emergencyType);
+
+        printf("Vehicles: %d\n", lane.vehicles);
+
+        movementSplit(lane.vehicles);
+
+        int t = calculateTime(lane.vehicles);
+        printf("Time: %d sec\n", t);
+
+        sleep(t);
+
+        printf("DONE: %s\n", lane.name);
+
+        pthread_mutex_lock(&lock);
+
+        active_lane[id] = false;
+
+        // Reset lane after execution
+        lanes[id].vehicles = 0;
+        lanes[id].emergency = false;
+        strcpy(lanes[id].emergencyType, "");
+
+        pthread_mutex_unlock(&lock);
+    }
+
+    return NULL;
+}
+
+// ---------------- MAIN ----------------
+int main() {
+
+    pthread_t threads[LANES];
+    int ids[LANES];
+
+    pthread_mutex_init(&lock, NULL);
+    pthread_cond_init(&cond, NULL);
+
+    for (int i = 0; i < LANES; i++) {
+        ids[i] = i;
+        pthread_create(&threads[i], NULL, laneThread, &ids[i]);
+    }
+
+    printf("SMART TRAFFIC SYSTEM STARTED\n");
+
+    while (1) {
+
+        updateTrafficData();
+
+        while (1) {
+
+            pthread_mutex_lock(&lock);
+
+            int idx = selectLane();
+
+            if (idx == -1) {
+                pthread_mutex_unlock(&lock);
+                break;
+            }
+
+            active_lane[idx] = true;
+            pthread_cond_broadcast(&cond);
+
+            pthread_mutex_unlock(&lock);
+
+            // Wait for lane completion
+            while (1) {
+                pthread_mutex_lock(&lock);
+                if (!active_lane[idx]) {
+                    pthread_mutex_unlock(&lock);
+                    break;
+                }
+                pthread_mutex_unlock(&lock);
+            }
+        }
+    }
+
+    return 0;
+}
